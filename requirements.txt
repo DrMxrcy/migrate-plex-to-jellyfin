@@ -2,3 +2,5 @@ plexapi
 click
 requests
 loguru
+tqdm
+PyYAML
