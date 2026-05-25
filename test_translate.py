@@ -85,7 +85,7 @@ def test_translate_path_linux_to_windows_normalizes_separators() -> None:
                 PathTranslation("/mnt/media", r"D:\Media"),
             ],
         )
-        == rf"D:\Media\television\{EXAMPLE_FILENAME}"
+        == rf"D:\Media\television\{EXAMPLE_FILENAME}".replace("/", "\\")
     )
 
 
