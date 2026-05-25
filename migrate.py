@@ -105,10 +105,11 @@ def migrate_user(
     no_skip: bool,
     migrate_ratings: bool,
     migrate_favorites: bool,
+    migrate_timestamps: bool = True,
     bulk_mode: bool = False,
 ) -> MigrationStats:
     stats = MigrationStats()
-    track_item_meta = migrate_ratings or migrate_favorites
+    track_item_meta = migrate_ratings or migrate_favorites or migrate_timestamps
 
     # Build Jellyfin path index
     logger.info(f"Loading Jellyfin library for '{jf_user.name}'...")
@@ -186,9 +187,10 @@ def migrate_user(
             if not user_data.get("Played"):
                 stats.marked += 1
                 date_played = None
-                lv = meta.get("lastViewedAt")
-                if isinstance(lv, datetime):
-                    date_played = lv.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                if migrate_timestamps:
+                    lv = meta.get("lastViewedAt")
+                    if isinstance(lv, datetime):
+                        date_played = lv.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                 if not dry_run:
                     try:
                         jf.mark_watched(user_id=jf_user.id, item_id=item_id, date_played=date_played)
@@ -241,13 +243,15 @@ def migrate_user(
               help="Migrate Plex ratings to Jellyfin")
 @click.option("--migrate-favorites/--no-migrate-favorites", default=False,
               help="Migrate highly-rated Plex items (>=9) as Jellyfin favorites")
+@click.option("--migrate-timestamps/--no-migrate-timestamps", default=True,
+              help="Migrate Plex lastViewedAt to Jellyfin DatePlayed")
 @click.option("--secure/--insecure", default=False, help="Verify SSL certificates")
 @click.option("--debug/--no-debug", default=False, help="Verbose debug logging")
 @click.option("--no-skip/--skip", default=False, help="Exit (or fail user) on unmatched paths")
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without writing to Jellyfin")
 def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_token,
             jellyfin_user, all_users, auto_create_user, translate, migrate_ratings,
-            migrate_favorites, secure, debug, no_skip, dry_run):
+            migrate_favorites, migrate_timestamps, secure, debug, no_skip, dry_run):
     logger.remove()
     logger.add(sys.stderr, format=LOG_FORMAT, level="DEBUG" if debug else "INFO")
 
@@ -285,7 +289,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
             try:
                 stats = migrate_user(scoped_plex, jf, jf_user, translations,
                                      dry_run, no_skip, migrate_ratings, migrate_favorites,
-                                     bulk_mode=True)
+                                     migrate_timestamps, bulk_mode=True)
                 all_stats[plex_user.name] = (jf_user, stats)
             except Exception as e:
                 logger.error(f"Migration failed for '{plex_user.name}': {e}")
@@ -300,7 +304,8 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
             raise click.ClickException(f"Jellyfin user '{jellyfin_user}' not found")
 
         stats = migrate_user(plex, jf, jf_user, translations,
-                             dry_run, no_skip, migrate_ratings, migrate_favorites)
+                             dry_run, no_skip, migrate_ratings, migrate_favorites,
+                             migrate_timestamps)
         action = "Would migrate" if dry_run else "Successfully migrated"
         logger.bind(marked=stats.marked, missing=stats.missing, skipped=stats.skipped,
                     ratings=stats.ratings_set, favorites=stats.favorites_set).success(
