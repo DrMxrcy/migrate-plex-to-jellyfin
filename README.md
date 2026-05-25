@@ -29,6 +29,9 @@ docker compose run --rm migrate
 
 Docker only needs `config.yml` for this project. You do not need both a `.env` file and a YAML config.
 
+The Saltbox compose file pulls `ghcr.io/drmxrcy/migrate-plex-to-jellyfin:latest`.
+GitHub Actions publishes GHCR images on every commit; branch and SHA tags are created for all pushed branches, and `latest` is updated from the default branch.
+
 ---
 
 ## Saltbox Setup
