@@ -1,0 +1,37 @@
+# migrate-plex-to-jellyfin configuration file
+# Copy to config.yml and fill in your values.
+# All values here can be overridden by CLI flags.
+
+plex:
+  url: https://plex.yourdomain.com
+  token: YOUR_PLEX_TOKEN_HERE
+
+jellyfin:
+  url: https://jellyfin.yourdomain.com
+  token: YOUR_JELLYFIN_API_KEY_HERE
+
+options:
+  # Migrate all Plex users in one run
+  all_users: true
+
+  # Create Jellyfin accounts for Plex users who don't have one yet
+  auto_create_user: true
+
+  # Preview what would happen without writing anything
+  dry_run: false
+
+  # Migrate Plex star ratings to Jellyfin
+  migrate_ratings: false
+
+  # Mark items rated >=9 in Plex as Jellyfin favorites
+  migrate_favorites: false
+
+  # Verify SSL certificates (set false for self-signed certs)
+  secure: false
+
+# Path translations: Plex path prefix | Jellyfin path prefix
+# Needed when Plex and Jellyfin mount the same media at different paths.
+# Leave empty if paths match (common in Saltbox setups).
+translations: []
+# translations:
+#   - "/mnt/plex/Media|/data/Media"
