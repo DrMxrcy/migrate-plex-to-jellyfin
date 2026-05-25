@@ -4,9 +4,16 @@ import pytest
 from unittest.mock import MagicMock, patch, call
 from plexapi import library as plex_library
 
-from models import JellyfinUser, MigrationStats
+from models import PlexUser, JellyfinUser, MigrationStats
 from jellyfin_client import JellyFinServer
-from migrate import migrate, migrate_user, PathTranslation, build_translation_library, translate_path
+from migrate import (
+    migrate,
+    migrate_user,
+    PathTranslation,
+    build_translation_library,
+    build_user_mapping,
+    translate_path,
+)
 
 
 def make_plex_movie(file_path: str, user_rating=None, last_viewed_at=None, view_offset=None):
@@ -272,3 +279,75 @@ class TestCliOptions:
         result = CliRunner().invoke(migrate, ["--help"])
 
         assert "--migrate-positions / --no-migrate-positions" in result.output
+
+    def test_builds_user_mapping_from_cli_values(self):
+        assert build_user_mapping(["Plex User|Jellyfin User"]) == {
+            "Plex User": "Jellyfin User"
+        }
+
+    @patch("migrate.PlexServer")
+    @patch("migrate.JellyFinServer")
+    @patch("migrate.discover_plex_users")
+    def test_all_users_dry_run_summary_includes_users_that_would_be_created(
+        self,
+        discover_plex_users,
+        jellyfin_server,
+        plex_server,
+    ):
+        from click.testing import CliRunner
+
+        discover_plex_users.return_value = [
+            PlexUser(name="Carol", token="carol_token", is_managed=True)
+        ]
+        jellyfin_server.return_value.get_users.return_value = []
+
+        result = CliRunner().invoke(migrate, [
+            "--plex-url", "http://plex.local",
+            "--plex-token", "plex_token",
+            "--jellyfin-url", "http://jellyfin.local",
+            "--jellyfin-token", "jellyfin_token",
+            "--all-users",
+            "--dry-run",
+        ])
+
+        assert result.exit_code == 0
+        assert "Status" in result.output
+        assert "Carol" in result.output
+        assert "Would create" in result.output
+
+    @patch("migrate.PlexServer")
+    @patch("migrate.JellyFinServer")
+    @patch("migrate.discover_plex_users")
+    @patch("migrate.migrate_user")
+    def test_all_users_uses_configured_user_mapping(
+        self,
+        migrate_user_mock,
+        discover_plex_users,
+        jellyfin_server,
+        plex_server,
+        tmp_path,
+    ):
+        from click.testing import CliRunner
+        import yaml
+
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(yaml.dump({
+            "plex": {"url": "http://plex.local", "token": "plex_token"},
+            "jellyfin": {"url": "http://jellyfin.local", "token": "jellyfin_token"},
+            "options": {"all_users": True, "dry_run": True},
+            "user_mappings": {"Carol Plex": "Bob"},
+        }))
+        discover_plex_users.return_value = [
+            PlexUser(name="Carol Plex", token="carol_token", is_managed=True)
+        ]
+        jellyfin_server.return_value.get_users.return_value = [
+            JellyfinUser(id="2", name="Bob")
+        ]
+        migrate_user_mock.return_value = MigrationStats(marked=3)
+
+        result = CliRunner().invoke(migrate, ["--config", str(config_path)])
+
+        assert result.exit_code == 0
+        assert "Carol Plex -> Bob" in result.output
+        assert "Would migrate" in result.output
+        migrate_user_mock.assert_called_once()

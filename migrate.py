@@ -31,6 +31,12 @@ class PathTranslation(NamedTuple):
     dst: str
 
 
+class BulkMigrationResult(NamedTuple):
+    jellyfin_user: Optional[JellyfinUser]
+    stats: MigrationStats
+    status: str
+
+
 TranslationLib = List[PathTranslation]
 TICKS_PER_MILLISECOND = 10000
 
@@ -41,6 +47,24 @@ def build_translation_library(args: List[str]) -> TranslationLib:
         src, dst = arg.split("|", 1)
         translations.append(PathTranslation(src=src, dst=dst))
     return translations
+
+
+def build_user_mapping(args: List[str]) -> dict:
+    mappings = {}
+    for arg in args:
+        plex_name, jellyfin_name = arg.split("|", 1)
+        mappings[plex_name] = jellyfin_name
+    return mappings
+
+
+def _config_user_maps(raw_user_mappings) -> List[str]:
+    if not raw_user_mappings:
+        return []
+    if isinstance(raw_user_mappings, dict):
+        return [f"{plex_name}|{jellyfin_name}" for plex_name, jellyfin_name in raw_user_mappings.items()]
+    if isinstance(raw_user_mappings, list):
+        return raw_user_mappings
+    raise click.BadParameter("user_mappings must be a mapping or list of PLEX|JELLYFIN strings")
 
 
 def translate_path(path: str, translations: TranslationLib) -> str:
@@ -124,6 +148,7 @@ def _load_config_callback(ctx, param, value):
         "migrate_positions": opts.get("migrate_positions"),
         "secure": opts.get("secure"),
         "translate": raw.get("translations", []) or [],
+        "user_map": _config_user_maps(raw.get("user_mappings")),
     }
     ctx.default_map = {k: v for k, v in mapping.items() if v is not None}
     return value
@@ -320,6 +345,8 @@ def migrate_user(
               help="Create missing Jellyfin accounts (default: on with --all-users)")
 @click.option("--translate", type=str, multiple=True, default=[],
               help="Path translation SRC|DST (repeatable)")
+@click.option("--user-map", type=str, multiple=True, default=[],
+              help="Map Plex user to Jellyfin user PLEX|JELLYFIN (repeatable)")
 @click.option("--migrate-ratings/--no-migrate-ratings", default=False,
               help="Migrate Plex ratings to Jellyfin")
 @click.option("--migrate-favorites/--no-migrate-favorites", default=False,
@@ -333,7 +360,7 @@ def migrate_user(
 @click.option("--no-skip/--skip", default=False, help="Exit (or fail user) on unmatched paths")
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without writing to Jellyfin")
 def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_token,
-            jellyfin_user, all_users, auto_create_user, translate, migrate_ratings,
+            jellyfin_user, all_users, auto_create_user, translate, user_map, migrate_ratings,
             migrate_favorites, migrate_timestamps, migrate_positions, secure, debug,
             no_skip, dry_run):
     logger.remove()
@@ -359,6 +386,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
 
     jf = JellyFinServer(url=jellyfin_url, api_key=jellyfin_token, session=session)
     translations = build_translation_library(list(translate))
+    user_mappings = build_user_mapping(list(user_map))
 
     if all_users:
         plex_users = discover_plex_users(plex, plex_token)
@@ -366,17 +394,36 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
 
         for plex_user in plex_users:
             logger.info(f"Processing Plex user '{plex_user.name}'...")
-            jf_user = resolve_jellyfin_user(jf, plex_user.name, auto_create_user, dry_run)
+            mapped_name = user_mappings.get(plex_user.name)
+            jf_user = resolve_jellyfin_user(
+                jf,
+                plex_user.name,
+                auto_create_user,
+                dry_run,
+                mapped_name=mapped_name,
+            )
             if not jf_user:
+                status = "Would create" if dry_run and auto_create_user else "Skipped"
+                all_stats[plex_user.name] = BulkMigrationResult(
+                    jellyfin_user=None,
+                    stats=MigrationStats(),
+                    status=status,
+                )
                 continue
             scoped_plex = PlexServer(plex_url, plex_user.token, session=session)
             try:
                 stats = migrate_user(scoped_plex, jf, jf_user, translations,
                                      dry_run, no_skip, migrate_ratings, migrate_favorites,
                                      migrate_timestamps, migrate_positions, bulk_mode=True)
-                all_stats[plex_user.name] = (jf_user, stats)
+                status = "Would migrate" if dry_run else "Migrated"
+                all_stats[plex_user.name] = BulkMigrationResult(jf_user, stats, status)
             except Exception as e:
                 logger.error(f"Migration failed for '{plex_user.name}': {e}")
+                all_stats[plex_user.name] = BulkMigrationResult(
+                    jellyfin_user=jf_user,
+                    stats=MigrationStats(),
+                    status="Failed",
+                )
 
         _print_bulk_summary(all_stats, dry_run)
     else:
@@ -401,14 +448,16 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
 def _print_bulk_summary(all_stats: dict, dry_run: bool) -> None:
     action = "Would migrate" if dry_run else "Migration complete"
     print(f"\n{action} — summary:\n")
-    header = f"{'User':<20} {'Marked':>7} {'Missing':>8} {'Skipped':>8} {'Ratings':>8} {'Favorites':>10} {'Positions':>10}"
+    header = f"{'User':<32} {'Status':<13} {'Marked':>7} {'Missing':>8} {'Skipped':>8} {'Ratings':>8} {'Favorites':>10} {'Positions':>10}"
     print(header)
     print("-" * len(header))
-    for plex_name, (jf_user, stats) in all_stats.items():
+    for plex_name, result in all_stats.items():
+        jf_user = result.jellyfin_user
+        stats = result.stats
         label = plex_name
-        if jf_user.name != plex_name:
+        if jf_user and jf_user.name != plex_name:
             label = f"{plex_name} -> {jf_user.name}"
-        print(f"{label:<20} {stats.marked:>7} {stats.missing:>8} {stats.skipped:>8} "
+        print(f"{label:<32} {result.status:<13} {stats.marked:>7} {stats.missing:>8} {stats.skipped:>8} "
               f"{stats.ratings_set:>8} {stats.favorites_set:>10} {stats.playback_positions_set:>10}")
     print()
 

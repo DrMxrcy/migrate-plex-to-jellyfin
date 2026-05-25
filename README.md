@@ -10,15 +10,16 @@ Supports bulk migration of all users, auto Jellyfin account creation, and path t
 ```bash
 # 1. Clone the project into Saltbox's /opt app folder
 sudo git clone https://github.com/DrMxrcy/migrate-plex-to-jellyfin.git /opt/migrate-plex-to-jellyfin
+sudo chown -R 1000:1000 /opt/migrate-plex-to-jellyfin
 cd /opt/migrate-plex-to-jellyfin
 
 # 2. Use the Saltbox compose file and create your config
-sudo cp docker-compose.saltbox.yml docker-compose.yml
-sudo cp config.example.yml config.yml
+cp docker-compose.saltbox.yml docker-compose.yml
+cp config.example.yml config.yml
 
 # 3. Fill in your Plex and Jellyfin tokens
 #    Saltbox defaults use http://plex:32400 and http://jellyfin:8096
-sudo nano config.yml
+nano config.yml
 
 # 4. Dry run first — nothing is written to Jellyfin
 docker compose run --rm migrate --dry-run
@@ -36,7 +37,7 @@ GitHub Actions publishes GHCR images on every commit; branch and SHA tags are cr
 
 ## Saltbox Setup
 
-The Saltbox compose file is intentionally simple and follows the usual `/opt/<app>` pattern. It uses the external `saltbox` network, stores config under `/opt/migrate-plex-to-jellyfin`, mounts `/mnt`, and marks the service with the Saltbox managed label.
+The Saltbox compose file is intentionally simple and follows the usual `/opt/<app>` pattern. It runs as `1000:1000`, uses the external `saltbox` network, stores config under `/opt/migrate-plex-to-jellyfin`, mounts `/mnt`, and marks the service with the Saltbox managed label.
 
 In `/opt/migrate-plex-to-jellyfin/config.yml`, keep the Plex/Jellyfin URLs on the internal container names:
 
@@ -80,6 +81,8 @@ options:
   migrate_positions: true  # copy viewOffset resume points to Jellyfin
   secure: false            # set true for verified SSL
 
+user_mappings: {}          # see User Mapping below
+
 translations: []           # see Path Translation below
 ```
 
@@ -103,6 +106,7 @@ Users:
   --all-users                    Migrate all Plex users in one run
   --auto-create-user / --no-auto-create-user
                                  Create missing Jellyfin accounts (default on with --all-users)
+  --user-map PLEX|JELLYFIN       Assign Plex user to existing Jellyfin user (repeatable)
 
 Migration options:
   --migrate-ratings / --no-migrate-ratings
@@ -121,6 +125,24 @@ Behaviour:
   --no-skip / --skip             Fail on unmatched paths (default: skip)
   --dry-run                      Preview without writing to Jellyfin
   --help                         Show this message and exit
+```
+
+### User Mapping
+
+Bulk mode first tries to match Plex users to Jellyfin users by exact name, then by case-insensitive name. If no Jellyfin user matches, `auto_create_user: true` creates a new Jellyfin account.
+
+To assign a Plex user to an existing Jellyfin account instead, add `user_mappings`:
+
+```yaml
+user_mappings:
+  "Gavin Snell (Gavin8tor245)": "gavin"
+  "JP": "john"
+```
+
+The same mapping can be passed from the CLI:
+
+```bash
+python3 migrate.py --all-users --user-map "Gavin Snell (Gavin8tor245)|gavin"
 ```
 
 ### Single user example

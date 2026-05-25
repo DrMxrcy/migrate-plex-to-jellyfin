@@ -37,6 +37,14 @@ options:
   # Verify SSL certificates (set false for self-signed certs)
   secure: false
 
+# Optional Plex user -> existing Jellyfin user assignments.
+# Use this when a Plex display name should migrate into an existing Jellyfin account
+# instead of creating a new account with the Plex name.
+user_mappings: {}
+# user_mappings:
+#   "Gavin Snell (Gavin8tor245)": "gavin"
+#   "JP": "john"
+
 # Path translations: Plex path prefix | Jellyfin path prefix
 # Needed when Plex and Jellyfin mount the same media at different paths.
 # Leave empty if paths match (common in Saltbox setups).

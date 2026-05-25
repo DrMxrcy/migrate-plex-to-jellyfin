@@ -36,17 +36,31 @@ def resolve_jellyfin_user(
     plex_name: str,
     auto_create: bool,
     dry_run: bool,
+    mapped_name: Optional[str] = None,
 ) -> Optional[JellyfinUser]:
     jf_users = jf.get_users()
+    search_name = mapped_name or plex_name
 
     for u in jf_users:
-        if u.name == plex_name:
+        if u.name == search_name:
+            if mapped_name and mapped_name != plex_name:
+                logger.info(f"Mapped Plex user '{plex_name}' → Jellyfin user '{u.name}'")
             return u
 
     for u in jf_users:
-        if u.name.lower() == plex_name.lower():
-            logger.info(f"Matched Plex user '{plex_name}' → Jellyfin user '{u.name}' (case-insensitive)")
+        if u.name.lower() == search_name.lower():
+            if mapped_name:
+                logger.info(f"Mapped Plex user '{plex_name}' → Jellyfin user '{u.name}' (case-insensitive)")
+            else:
+                logger.info(f"Matched Plex user '{plex_name}' → Jellyfin user '{u.name}' (case-insensitive)")
             return u
+
+    if mapped_name:
+        logger.warning(
+            f"Plex user '{plex_name}' is mapped to Jellyfin user '{mapped_name}', "
+            "but that Jellyfin user was not found — skipping"
+        )
+        return None
 
     if not auto_create:
         logger.warning(

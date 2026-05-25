@@ -103,3 +103,25 @@ class TestResolveJellyfinUser:
         ]
         user = resolve_jellyfin_user(jf, "Alice", auto_create=False, dry_run=False)
         assert user.id == "2"
+
+    def test_uses_explicit_mapping_to_existing_user(self, jf):
+        user = resolve_jellyfin_user(
+            jf,
+            "Gavin Snell (Gavin8tor245)",
+            auto_create=True,
+            dry_run=False,
+            mapped_name="Bob",
+        )
+        assert user == JellyfinUser(id="2", name="Bob")
+        jf.create_user.assert_not_called()
+
+    def test_missing_explicit_mapping_does_not_create_user(self, jf):
+        user = resolve_jellyfin_user(
+            jf,
+            "Gavin Snell (Gavin8tor245)",
+            auto_create=True,
+            dry_run=False,
+            mapped_name="Missing Jellyfin User",
+        )
+        assert user is None
+        jf.create_user.assert_not_called()
