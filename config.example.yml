@@ -26,6 +26,9 @@ options:
   # Mark items rated >=9 in Plex as Jellyfin favorites
   migrate_favorites: false
 
+  # Migrate Plex lastViewedAt timestamps to Jellyfin DatePlayed
+  migrate_timestamps: true
+
   # Verify SSL certificates (set false for self-signed certs)
   secure: false
 

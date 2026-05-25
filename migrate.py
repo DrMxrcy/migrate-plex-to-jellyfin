@@ -89,6 +89,7 @@ def _load_config_callback(ctx, param, value):
         "dry_run": opts.get("dry_run"),
         "migrate_ratings": opts.get("migrate_ratings"),
         "migrate_favorites": opts.get("migrate_favorites"),
+        "migrate_timestamps": opts.get("migrate_timestamps"),
         "secure": opts.get("secure"),
         "translate": raw.get("translations", []) or [],
     }
