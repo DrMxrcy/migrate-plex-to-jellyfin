@@ -8,19 +8,19 @@ Supports bulk migration of all users, auto Jellyfin account creation, and path t
 ## Quick Start (Saltbox Docker — recommended)
 
 ```bash
-# 1. Create the Saltbox app folder
-sudo mkdir -p /opt/migrate-plex-to-jellyfin
+# 1. Clone the project into Saltbox's /opt app folder
+sudo git clone https://github.com/DrMxrcy/migrate-plex-to-jellyfin.git /opt/migrate-plex-to-jellyfin
+cd /opt/migrate-plex-to-jellyfin
 
-# 2. Put the compose and config files there
-sudo cp docker-compose.saltbox.yml /opt/migrate-plex-to-jellyfin/docker-compose.yml
-sudo cp config.example.yml /opt/migrate-plex-to-jellyfin/config.yml
+# 2. Use the Saltbox compose file and create your config
+sudo cp docker-compose.saltbox.yml docker-compose.yml
+sudo cp config.example.yml config.yml
 
 # 3. Fill in your Plex and Jellyfin tokens
 #    Saltbox defaults use http://plex:32400 and http://jellyfin:8096
-sudo nano /opt/migrate-plex-to-jellyfin/config.yml
+sudo nano config.yml
 
 # 4. Dry run first — nothing is written to Jellyfin
-cd /opt/migrate-plex-to-jellyfin
 docker compose run --rm migrate --dry-run
 
 # 5. Run for real when the dry run looks right
