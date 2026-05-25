@@ -203,13 +203,159 @@ jane (new)         89       1        14       0        0
 
 ---
 
-## Section 6: Testing
+## Section 6: Config File Support (`--config`)
+
+Add an optional `--config config.yml` flag. When provided, values in the YAML file are used as defaults; CLI flags override them. This avoids re-typing long commands with many `--translate` entries.
+
+### Schema (`config.yml`)
+```yaml
+plex:
+  url: https://plex.example.com
+  token: YOUR_PLEX_TOKEN
+
+jellyfin:
+  url: https://jellyfin.example.com
+  token: YOUR_JELLYFIN_TOKEN
+
+options:
+  all_users: true
+  auto_create_user: true
+  dry_run: false
+  migrate_ratings: false
+  migrate_favorites: false
+  secure: false
+
+translations:
+  - "/mnt/unionfs/Media|/data/Media"
+```
+
+Implementation: use PyYAML (add to `requirements.txt`) + a `load_config(path)` helper in `migrate.py` that merges config into click's default map.
+
+---
+
+## Section 7: UX Improvements
+
+### Progress bars (`tqdm`)
+Add `tqdm` to `requirements.txt`. Wrap the `iter_items()` consumer and the Plex watched-item loop with `tqdm` progress bars so large library scans give visible feedback instead of silently hanging.
+
+### `requirements.txt` additions
+```
+tqdm
+PyYAML
+```
+
+---
+
+## Section 8: Docker & Deployment
+
+### Dockerfile improvements
+Current: `FROM python:slim` (unpinned), no `.dockerignore`, CMD duplicates ENTRYPOINT.
+
+Updated:
+```dockerfile
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY *.py ./
+ENTRYPOINT ["python3", "migrate.py"]
+```
+
+Add `.dockerignore`:
+```
+.git
+docs
+*.md
+venv
+__pycache__
+*.pyc
+plexsync
+```
+
+### `docker-compose.yml` (generic)
+```yaml
+services:
+  migrate:
+    image: ghcr.io/wilmardo/migrate-plex-to-jellyfin:latest
+    env_file: .env
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    command: --config /app/config.yml
+```
+
+### `docker-compose.saltbox.yml` (Saltbox)
+Saltbox runs Plex and Jellyfin on the `saltbox` Docker network. Both containers typically mount media at `/data/Media/` internally (host: `/mnt/unionfs/Media/`), so paths match without `--translate`.
+
+```yaml
+services:
+  migrate:
+    image: ghcr.io/wilmardo/migrate-plex-to-jellyfin:latest
+    networks:
+      - saltbox
+    env_file: .env
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    command: --config /app/config.yml
+    restart: "no"
+
+networks:
+  saltbox:
+    external: true
+```
+
+`.env.example`:
+```env
+# Copy to .env and fill in your values
+PLEX_URL=https://plex.yourdomain.com
+PLEX_TOKEN=your_plex_token_here
+JELLYFIN_URL=https://jellyfin.yourdomain.com
+JELLYFIN_TOKEN=your_jellyfin_token_here
+```
+
+### Pre-built image on GHCR
+`.github/workflows/publish.yml` — builds and pushes `ghcr.io/<owner>/migrate-plex-to-jellyfin:latest` and `:<tag>` on every pushed tag. Allows users to `docker pull` without building locally.
+
+---
+
+## Section 9: GitHub Actions
+
+### `.github/workflows/test.yml`
+Runs `pytest` on every push and PR. Matrix: Python 3.11, 3.12.
+
+### `.github/workflows/publish.yml`
+Triggered on `push: tags: ['v*']`. Builds multi-platform image (`linux/amd64`, `linux/arm64`) and pushes to GHCR.
+
+---
+
+## Section 10: README Overhaul
+
+Sections to add/update:
+- **Quick start** — most common case in 3 commands (clone → copy `.env.example` → `docker compose run`)
+- **Saltbox** — dedicated subsection with docker-compose.saltbox.yml usage
+- **All CLI flags** — updated table including `--all-users`, `--auto-create-user`, `--migrate-ratings`, `--migrate-favorites`, `--config`
+- **Config file** — YAML example with all fields
+- **Docker Compose** — both generic and Saltbox variants
+- **Pre-built image** — `docker pull ghcr.io/...` one-liner
+- **Dry run guidance** — always recommend `--dry-run` first
+- **Translation guide** — existing section updated with more examples
+
+---
+
+## Section 11: Testing
 
 Existing `test_translate.py` is unchanged. New tests to add:
 
 - `test_user_manager.py` — mock PlexAPI and JellyfinClient, test exact match / case-insensitive match / auto-create / dry-run paths
 - `test_jellyfin_client.py` — mock `requests.Session`, test pagination stops correctly, tests error handling on non-2xx and bad JSON
 - `test_migrate.py` — integration-style test of `migrate_user()` with mocked clients
+- `test_config.py` — test config file loading, CLI override precedence
+
+Add `pytest-mock` to `requirements.dev.txt`.
 
 Run with: `pytest`
 
@@ -218,7 +364,10 @@ Run with: `pytest`
 ## Verification
 
 1. `python migrate.py --help` — verify all new flags appear
-2. `python migrate.py --dry-run --all-users --plex-url ... --plex-token ... --jellyfin-url ... --jellyfin-token ...` — should enumerate all users and log what would happen without any writes
-3. `python migrate.py --dry-run --migrate-ratings --migrate-favorites --plex-url ... --jellyfin-user ...` — single user with ratings dry run
-4. `pytest` — all existing translate tests pass, new unit tests pass
-5. `python migrate.py --no-skip ...` — verify exit code is non-zero when a path has no match
+2. `python migrate.py --dry-run --all-users --plex-url ... --plex-token ... --jellyfin-url ... --jellyfin-token ...` — enumerate all users and log what would happen without writes
+3. `python migrate.py --dry-run --config config.yml` — config file loaded correctly, CLI flags override it
+4. `python migrate.py --dry-run --migrate-ratings --migrate-favorites --plex-url ... --jellyfin-user ...` — single user with ratings dry run
+5. `docker compose -f docker-compose.yml run migrate --dry-run` — runs from pre-built image
+6. `docker compose -f docker-compose.saltbox.yml run migrate --dry-run` — Saltbox network reachable
+7. `pytest` — all translate tests pass, all new unit tests pass
+8. `python migrate.py --no-skip ...` — exit code non-zero when path has no match
