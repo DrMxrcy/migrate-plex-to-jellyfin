@@ -151,6 +151,16 @@ class TestMarkWatched:
             client.mark_watched("uid", "iid")
 
 
+class TestSetPlaybackPosition:
+    def test_posts_to_user_item_data_endpoint(self, client, session):
+        session.post.return_value = ok_response({})
+        client.set_playback_position("uid", "iid", 123450000)
+        call_kwargs = session.post.call_args.kwargs
+        assert "UserItems/iid/UserData" in call_kwargs["url"]
+        assert call_kwargs["params"] == {"userId": "uid"}
+        assert call_kwargs["json"] == {"PlaybackPositionTicks": 123450000}
+
+
 class TestSetRating:
     def test_posts_to_rating_endpoint(self, client, session):
         session.post.return_value = ok_response({})

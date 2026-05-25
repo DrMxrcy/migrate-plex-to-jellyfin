@@ -50,3 +50,13 @@ class TestConfigFile:
         # Just verifying the config parses without error
         result = runner.invoke(migrate, ["--config", config_path, "--jellyfin-user", "u", "--dry-run"])
         assert "Error: Invalid value for '--config'" not in result.output
+
+    def test_config_accepts_migrate_positions_option(self, tmp_path):
+        config_path = write_config(tmp_path, {
+            "plex": {"url": "http://p.local", "token": "pt"},
+            "jellyfin": {"url": "http://j.local", "token": "jt"},
+            "options": {"migrate_positions": False},
+        })
+        runner = CliRunner()
+        result = runner.invoke(migrate, ["--config", config_path, "--jellyfin-user", "u", "--dry-run"])
+        assert "Error: Invalid value for '--config'" not in result.output

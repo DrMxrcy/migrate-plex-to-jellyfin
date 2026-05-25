@@ -1,9 +1,10 @@
 services:
   migrate:
-    image: ghcr.io/wilmardo/migrate-plex-to-jellyfin:latest
-    env_file:
-      - .env
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: migrate-plex-to-jellyfin:local
     volumes:
       - ./config.yml:/app/config.yml:ro
-    command: --config /app/config.yml
+    entrypoint: ["python3", "migrate.py", "--config", "/app/config.yml"]
     restart: "no"

@@ -3,11 +3,13 @@
 # All values here can be overridden by CLI flags.
 
 plex:
-  url: https://plex.yourdomain.com
+  # Saltbox default: Plex is reachable on the saltbox Docker network as plex:32400
+  url: http://plex:32400
   token: YOUR_PLEX_TOKEN_HERE
 
 jellyfin:
-  url: https://jellyfin.yourdomain.com
+  # Saltbox default: Jellyfin is reachable on the saltbox Docker network as jellyfin:8096
+  url: http://jellyfin:8096
   token: YOUR_JELLYFIN_API_KEY_HERE
 
 options:
@@ -28,6 +30,9 @@ options:
 
   # Migrate Plex lastViewedAt timestamps to Jellyfin DatePlayed
   migrate_timestamps: true
+
+  # Migrate Plex viewOffset resume positions to Jellyfin PlaybackPositionTicks
+  migrate_positions: true
 
   # Verify SSL certificates (set false for self-signed certs)
   secure: false

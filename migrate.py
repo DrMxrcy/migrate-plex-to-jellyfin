@@ -32,6 +32,7 @@ class PathTranslation(NamedTuple):
 
 
 TranslationLib = List[PathTranslation]
+TICKS_PER_MILLISECOND = 10000
 
 
 def build_translation_library(args: List[str]) -> TranslationLib:
@@ -59,6 +60,36 @@ def _watch_parts(media: List[Media]) -> Set[str]:
     for medium in media:
         watched.update(p.file for p in medium.parts)
     return watched
+
+
+def _view_offset_ms(item) -> Optional[int]:
+    view_offset = getattr(item, "viewOffset", None)
+    if not view_offset:
+        return None
+    try:
+        return int(view_offset)
+    except (TypeError, ValueError):
+        return None
+
+
+def _item_meta(item) -> dict:
+    return {
+        "lastViewedAt": getattr(item, "lastViewedAt", None),
+        "userRating": getattr(item, "userRating", None),
+        "viewOffset": _view_offset_ms(item),
+    }
+
+
+def _remember_plex_item(paths: Set[str], item_meta: dict, item) -> Set[str]:
+    parts = _watch_parts(item.media)
+    paths.update(parts)
+    meta = _item_meta(item)
+    for path in parts:
+        existing = item_meta.setdefault(path, {})
+        for key, value in meta.items():
+            if value is not None:
+                existing[key] = value
+    return parts
 
 
 def _validate_url(ctx, param, value):
@@ -90,6 +121,7 @@ def _load_config_callback(ctx, param, value):
         "migrate_ratings": opts.get("migrate_ratings"),
         "migrate_favorites": opts.get("migrate_favorites"),
         "migrate_timestamps": opts.get("migrate_timestamps"),
+        "migrate_positions": opts.get("migrate_positions"),
         "secure": opts.get("secure"),
         "translate": raw.get("translations", []) or [],
     }
@@ -107,10 +139,10 @@ def migrate_user(
     migrate_ratings: bool,
     migrate_favorites: bool,
     migrate_timestamps: bool = True,
+    migrate_positions: bool = True,
     bulk_mode: bool = False,
 ) -> MigrationStats:
     stats = MigrationStats()
-    track_item_meta = migrate_ratings or migrate_favorites or migrate_timestamps
 
     # Build Jellyfin path index
     logger.info(f"Loading Jellyfin library for '{jf_user.name}'...")
@@ -125,19 +157,35 @@ def migrate_user(
 
     # Load Plex watched items
     logger.info(f"Loading Plex watched items...")
+    plex_paths: Set[str] = set()
     plex_watched: Set[str] = set()
     plex_item_meta: dict = {}
 
     for section in plex.library.sections():
         if isinstance(section, library.MovieSection):
             for m in tqdm(section.search(unwatched=False), desc=f"Movies ({section.title})", unit=" movie", leave=False):
-                parts = _watch_parts(m.media)
+                parts = _remember_plex_item(plex_paths, plex_item_meta, m)
                 plex_watched.update(parts)
-                meta = {"lastViewedAt": getattr(m, "lastViewedAt", None)}
-                if track_item_meta:
-                    meta["userRating"] = getattr(m, "userRating", None)
-                for p in parts:
-                    plex_item_meta[p] = meta
+
+            if migrate_positions:
+                try:
+                    in_progress_movies = section.search(inProgress=True)
+                except Exception:
+                    logger.warning(
+                        f"PlexAPI inProgress movie filter not supported for '{section.title}' — "
+                        f"falling back to client-side filter"
+                    )
+                    in_progress_movies = [
+                        m for m in section.search() if _view_offset_ms(m)
+                    ]
+
+                for m in tqdm(
+                    in_progress_movies,
+                    desc=f"Movie positions ({section.title})",
+                    unit=" movie",
+                    leave=False,
+                ):
+                    _remember_plex_item(plex_paths, plex_item_meta, m)
 
         elif isinstance(section, library.ShowSection):
             try:
@@ -151,13 +199,28 @@ def migrate_user(
 
             for show in tqdm(shows, desc=f"TV ({section.title})", unit=" show", leave=False):
                 for ep in show.watched():
-                    parts = _watch_parts(ep.media)
+                    parts = _remember_plex_item(plex_paths, plex_item_meta, ep)
                     plex_watched.update(parts)
-                    meta = {"lastViewedAt": getattr(ep, "lastViewedAt", None)}
-                    if track_item_meta:
-                        meta["userRating"] = getattr(ep, "userRating", None)
-                    for p in parts:
-                        plex_item_meta[p] = meta
+
+            if migrate_positions:
+                try:
+                    in_progress_episodes = section.searchEpisodes(inProgress=True)
+                except Exception:
+                    logger.warning(
+                        f"PlexAPI inProgress episode filter not supported for '{section.title}' — "
+                        f"falling back to client-side filter"
+                    )
+                    in_progress_episodes = [
+                        ep for ep in section.searchEpisodes() if _view_offset_ms(ep)
+                    ]
+
+                for ep in tqdm(
+                    in_progress_episodes,
+                    desc=f"Episode positions ({section.title})",
+                    unit=" episode",
+                    leave=False,
+                ):
+                    _remember_plex_item(plex_paths, plex_item_meta, ep)
 
         else:
             logger.info(
@@ -165,8 +228,9 @@ def migrate_user(
             )
 
     # Match and migrate
-    for watched in tqdm(plex_watched, desc="Migrating", unit=" item", leave=False):
-        tr_watched = translate_path(watched, translations)
+    for plex_path in tqdm(plex_paths, desc="Migrating", unit=" item", leave=False):
+        meta = plex_item_meta.get(plex_path, {})
+        tr_watched = translate_path(plex_path, translations)
 
         if tr_watched not in jf_entries:
             logger.bind(path=tr_watched).warning(
@@ -185,7 +249,7 @@ def migrate_user(
             item_id = jf_entry["Id"]
             item_name = jf_entry["Name"]
 
-            if not user_data.get("Played"):
+            if plex_path in plex_watched and not user_data.get("Played"):
                 stats.marked += 1
                 date_played = None
                 if migrate_timestamps:
@@ -200,12 +264,28 @@ def migrate_user(
                         logger.error(f"Failed to mark '{item_name}' as watched: {e}")
                 else:
                     logger.bind(path=tr_watched, jf_id=item_id, title=item_name).info("Would be marked as watched (dry run)")
-            else:
+            elif plex_path in plex_watched:
                 stats.skipped += 1
                 logger.bind(path=tr_watched, jf_id=item_id, title=item_name).debug("Already watched — skipped")
 
-            meta = plex_item_meta.get(tr_watched, {})
             user_rating = meta.get("userRating")
+            view_offset_ms = meta.get("viewOffset")
+
+            if migrate_positions and view_offset_ms:
+                position_ticks = view_offset_ms * TICKS_PER_MILLISECOND
+                stats.playback_positions_set += 1
+                if not dry_run:
+                    try:
+                        jf.set_playback_position(jf_user.id, item_id, position_ticks)
+                    except JellyfinAPIError as e:
+                        logger.error(f"Failed to set playback position for '{item_name}': {e}")
+                else:
+                    logger.bind(
+                        path=tr_watched,
+                        jf_id=item_id,
+                        title=item_name,
+                        position_ticks=position_ticks,
+                    ).info("Would set playback position (dry run)")
 
             if migrate_ratings and user_rating is not None:
                 stats.ratings_set += 1
@@ -246,13 +326,16 @@ def migrate_user(
               help="Migrate highly-rated Plex items (>=9) as Jellyfin favorites")
 @click.option("--migrate-timestamps/--no-migrate-timestamps", default=True,
               help="Migrate Plex lastViewedAt to Jellyfin DatePlayed")
+@click.option("--migrate-positions/--no-migrate-positions", default=True,
+              help="Migrate Plex viewOffset resume positions to Jellyfin")
 @click.option("--secure/--insecure", default=False, help="Verify SSL certificates")
 @click.option("--debug/--no-debug", default=False, help="Verbose debug logging")
 @click.option("--no-skip/--skip", default=False, help="Exit (or fail user) on unmatched paths")
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without writing to Jellyfin")
 def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_token,
             jellyfin_user, all_users, auto_create_user, translate, migrate_ratings,
-            migrate_favorites, migrate_timestamps, secure, debug, no_skip, dry_run):
+            migrate_favorites, migrate_timestamps, migrate_positions, secure, debug,
+            no_skip, dry_run):
     logger.remove()
     logger.add(sys.stderr, format=LOG_FORMAT, level="DEBUG" if debug else "INFO")
 
@@ -290,7 +373,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
             try:
                 stats = migrate_user(scoped_plex, jf, jf_user, translations,
                                      dry_run, no_skip, migrate_ratings, migrate_favorites,
-                                     migrate_timestamps, bulk_mode=True)
+                                     migrate_timestamps, migrate_positions, bulk_mode=True)
                 all_stats[plex_user.name] = (jf_user, stats)
             except Exception as e:
                 logger.error(f"Migration failed for '{plex_user.name}': {e}")
@@ -306,10 +389,11 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
 
         stats = migrate_user(plex, jf, jf_user, translations,
                              dry_run, no_skip, migrate_ratings, migrate_favorites,
-                             migrate_timestamps)
+                             migrate_timestamps, migrate_positions)
         action = "Would migrate" if dry_run else "Successfully migrated"
         logger.bind(marked=stats.marked, missing=stats.missing, skipped=stats.skipped,
-                    ratings=stats.ratings_set, favorites=stats.favorites_set).success(
+                    ratings=stats.ratings_set, favorites=stats.favorites_set,
+                    positions=stats.playback_positions_set).success(
             f"{action} watched states for '{jellyfin_user}'"
         )
 
@@ -317,7 +401,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
 def _print_bulk_summary(all_stats: dict, dry_run: bool) -> None:
     action = "Would migrate" if dry_run else "Migration complete"
     print(f"\n{action} — summary:\n")
-    header = f"{'User':<20} {'Marked':>7} {'Missing':>8} {'Skipped':>8} {'Ratings':>8} {'Favorites':>10}"
+    header = f"{'User':<20} {'Marked':>7} {'Missing':>8} {'Skipped':>8} {'Ratings':>8} {'Favorites':>10} {'Positions':>10}"
     print(header)
     print("-" * len(header))
     for plex_name, (jf_user, stats) in all_stats.items():
@@ -325,7 +409,7 @@ def _print_bulk_summary(all_stats: dict, dry_run: bool) -> None:
         if jf_user.name != plex_name:
             label = f"{plex_name} -> {jf_user.name}"
         print(f"{label:<20} {stats.marked:>7} {stats.missing:>8} {stats.skipped:>8} "
-              f"{stats.ratings_set:>8} {stats.favorites_set:>10}")
+              f"{stats.ratings_set:>8} {stats.favorites_set:>10} {stats.playback_positions_set:>10}")
     print()
 
 

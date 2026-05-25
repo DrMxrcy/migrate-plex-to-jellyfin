@@ -6,10 +6,10 @@ from plexapi import library as plex_library
 
 from models import JellyfinUser, MigrationStats
 from jellyfin_client import JellyFinServer
-from migrate import migrate_user, PathTranslation, build_translation_library, translate_path
+from migrate import migrate, migrate_user, PathTranslation, build_translation_library, translate_path
 
 
-def make_plex_movie(file_path: str, user_rating=None, last_viewed_at=None):
+def make_plex_movie(file_path: str, user_rating=None, last_viewed_at=None, view_offset=None):
     part = MagicMock()
     part.file = file_path
     medium = MagicMock()
@@ -18,10 +18,11 @@ def make_plex_movie(file_path: str, user_rating=None, last_viewed_at=None):
     movie.media = [medium]
     movie.userRating = user_rating
     movie.lastViewedAt = last_viewed_at
+    movie.viewOffset = view_offset
     return movie
 
 
-def make_plex_episode(file_path: str, user_rating=None, last_viewed_at=None):
+def make_plex_episode(file_path: str, user_rating=None, last_viewed_at=None, view_offset=None):
     part = MagicMock()
     part.file = file_path
     medium = MagicMock()
@@ -30,6 +31,7 @@ def make_plex_episode(file_path: str, user_rating=None, last_viewed_at=None):
     ep.media = [medium]
     ep.userRating = user_rating
     ep.lastViewedAt = last_viewed_at
+    ep.viewOffset = view_offset
     return ep
 
 
@@ -48,17 +50,25 @@ def make_plex(sections):
     return plex
 
 
-def make_movie_section(movies):
+def make_movie_section(movies, in_progress_movies=None):
     section = MagicMock(spec=plex_library.MovieSection)
     section.title = "Movies"
-    section.search.return_value = movies
+    in_progress_movies = [] if in_progress_movies is None else in_progress_movies
+
+    def search(**kwargs):
+        if kwargs.get("inProgress"):
+            return in_progress_movies
+        return movies
+
+    section.search.side_effect = search
     return section
 
 
-def make_show_section(shows):
+def make_show_section(shows, in_progress_episodes=None):
     section = MagicMock(spec=plex_library.ShowSection)
     section.title = "TV Shows"
     section.searchShows.return_value = shows
+    section.searchEpisodes.return_value = [] if in_progress_episodes is None else in_progress_episodes
     return section
 
 
@@ -195,3 +205,70 @@ class TestMigrateUserRatings:
                      migrate_ratings=False, migrate_favorites=True)
 
         jf.mark_favorite.assert_not_called()
+
+
+class TestMigrateUserPlaybackPositions:
+    def test_migrates_resume_position_for_in_progress_movie(self, jf, jf_user):
+        movie = make_plex_movie("/media/film.mkv", view_offset=12345)
+        jf_item = make_jf_item("jf1", "/media/film.mkv", played=False)
+        jf.iter_items.return_value = iter([jf_item])
+        plex = make_plex([make_movie_section([], in_progress_movies=[movie])])
+
+        stats = migrate_user(plex, jf, jf_user, [], dry_run=False, no_skip=False,
+                             migrate_ratings=False, migrate_favorites=False)
+
+        jf.mark_watched.assert_not_called()
+        jf.set_playback_position.assert_called_once_with("jf_uid", "jf1", 123450000)
+        assert stats.playback_positions_set == 1
+
+    def test_migrates_resume_position_for_in_progress_episode(self, jf, jf_user):
+        episode = make_plex_episode("/media/show/s01e01.mkv", view_offset=7654)
+        jf_item = make_jf_item("jf_ep1", "/media/show/s01e01.mkv", played=False)
+        jf.iter_items.return_value = iter([jf_item])
+        plex = make_plex([make_show_section([], in_progress_episodes=[episode])])
+
+        stats = migrate_user(plex, jf, jf_user, [], dry_run=False, no_skip=False,
+                             migrate_ratings=False, migrate_favorites=False)
+
+        jf.mark_watched.assert_not_called()
+        jf.set_playback_position.assert_called_once_with("jf_uid", "jf_ep1", 76540000)
+        assert stats.playback_positions_set == 1
+
+    def test_does_not_migrate_resume_position_when_disabled(self, jf, jf_user):
+        movie = make_plex_movie("/media/film.mkv", view_offset=12345)
+        jf_item = make_jf_item("jf1", "/media/film.mkv", played=False)
+        jf.iter_items.return_value = iter([jf_item])
+        plex = make_plex([make_movie_section([], in_progress_movies=[movie])])
+
+        stats = migrate_user(plex, jf, jf_user, [], dry_run=False, no_skip=False,
+                             migrate_ratings=False, migrate_favorites=False,
+                             migrate_positions=False)
+
+        jf.set_playback_position.assert_not_called()
+        assert stats.playback_positions_set == 0
+
+    def test_uses_matching_item_timestamp_for_each_path(self, jf, jf_user):
+        first_viewed_at = datetime(2023, 10, 15, 14, 30, 0)
+        second_viewed_at = datetime(2024, 1, 2, 3, 4, 5)
+        first_movie = make_plex_movie("/media/first.mkv", last_viewed_at=first_viewed_at)
+        second_movie = make_plex_movie("/media/second.mkv", last_viewed_at=second_viewed_at)
+        jf.iter_items.return_value = iter([
+            make_jf_item("jf1", "/media/first.mkv", played=False),
+            make_jf_item("jf2", "/media/second.mkv", played=False),
+        ])
+        plex = make_plex([make_movie_section([first_movie, second_movie])])
+
+        migrate_user(plex, jf, jf_user, [], dry_run=False, no_skip=False,
+                     migrate_ratings=False, migrate_favorites=False)
+
+        assert call(user_id="jf_uid", item_id="jf1", date_played="2023-10-15T14:30:00.000000Z") in jf.mark_watched.call_args_list
+        assert call(user_id="jf_uid", item_id="jf2", date_played="2024-01-02T03:04:05.000000Z") in jf.mark_watched.call_args_list
+
+
+class TestCliOptions:
+    def test_help_lists_migrate_positions_option(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(migrate, ["--help"])
+
+        assert "--migrate-positions / --no-migrate-positions" in result.output

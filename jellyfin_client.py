@@ -91,6 +91,13 @@ class JellyFinServer:
             params = {"DatePlayed": date_played}
         self._post(f"Users/{user_id}/PlayedItems/{item_id}", params=params)
 
+    def set_playback_position(self, user_id: str, item_id: str, position_ticks: int) -> None:
+        self._post(
+            f"UserItems/{item_id}/UserData",
+            params={"userId": user_id},
+            body={"PlaybackPositionTicks": position_ticks},
+        )
+
     def set_rating(self, user_id: str, item_id: str, rating: float) -> None:
         self._post(f"Users/{user_id}/Items/{item_id}/Rating", params={"rating": rating})
 

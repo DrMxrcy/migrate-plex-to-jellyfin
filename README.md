@@ -1,42 +1,41 @@
 # migrate-plex-to-jellyfin
 
-Migrate Plex watched states, ratings, favorites, and last-viewed timestamps to Jellyfin.
+Migrate Plex watched states, playback resume positions, ratings, favorites, and last-viewed timestamps to Jellyfin.
 Supports bulk migration of all users, auto Jellyfin account creation, and path translation for different mount points.
 
 ---
 
-## Quick Start (Docker — recommended)
+## Quick Start (Saltbox Docker — recommended)
 
 ```bash
-# 1. Copy the example files
-cp .env.example .env
-cp config.example.yml config.yml
+# 1. Create the Saltbox app folder
+sudo mkdir -p /opt/migrate-plex-to-jellyfin
 
-# 2. Fill in your tokens (see token guides below)
-#    .env    → PLEX_URL, PLEX_TOKEN, JELLYFIN_URL, JELLYFIN_TOKEN
-#    config.yml → options (all_users, dry_run, etc.)
+# 2. Put the compose and config files there
+sudo cp docker-compose.saltbox.yml /opt/migrate-plex-to-jellyfin/docker-compose.yml
+sudo cp config.example.yml /opt/migrate-plex-to-jellyfin/config.yml
 
-# 3. Dry run first — nothing is written to Jellyfin
+# 3. Fill in your Plex and Jellyfin tokens
+#    Saltbox defaults use http://plex:32400 and http://jellyfin:8096
+sudo nano /opt/migrate-plex-to-jellyfin/config.yml
+
+# 4. Dry run first — nothing is written to Jellyfin
+cd /opt/migrate-plex-to-jellyfin
 docker compose run --rm migrate --dry-run
 
-# 4. Run for real
+# 5. Run for real when the dry run looks right
 docker compose run --rm migrate
 ```
 
-Pre-built images are available at `ghcr.io/wilmardo/migrate-plex-to-jellyfin`.
+Docker only needs `config.yml` for this project. You do not need both a `.env` file and a YAML config.
 
 ---
 
 ## Saltbox Setup
 
-Saltbox users can use the dedicated compose file, which connects to the `saltbox` Docker network so Plex and Jellyfin are reachable by container name. Because both containers typically mount media at `/data/Media/`, no path translation is needed.
+The Saltbox compose file is intentionally simple and follows the usual `/opt/<app>` pattern. It uses the external `saltbox` network, stores config under `/opt/migrate-plex-to-jellyfin`, mounts `/mnt`, and marks the service with the Saltbox managed label.
 
-```bash
-docker compose -f docker-compose.saltbox.yml run --rm migrate --dry-run
-docker compose -f docker-compose.saltbox.yml run --rm migrate
-```
-
-In `config.yml`, set your Plex/Jellyfin URLs to the internal container names if they're on the same Docker host:
+In `/opt/migrate-plex-to-jellyfin/config.yml`, keep the Plex/Jellyfin URLs on the internal container names:
 
 ```yaml
 plex:
@@ -61,11 +60,11 @@ CLI flags always override config file values.
 
 ```yaml
 plex:
-  url: https://plex.yourdomain.com
+  url: http://plex:32400
   token: YOUR_PLEX_TOKEN
 
 jellyfin:
-  url: https://jellyfin.yourdomain.com
+  url: http://jellyfin:8096
   token: YOUR_JELLYFIN_API_KEY
 
 options:
@@ -75,6 +74,7 @@ options:
   migrate_ratings: false   # copy Plex star ratings to Jellyfin
   migrate_favorites: false # items rated ≥9 in Plex → Jellyfin favorite
   migrate_timestamps: true # copy lastViewedAt to Jellyfin DatePlayed
+  migrate_positions: true  # copy viewOffset resume points to Jellyfin
   secure: false            # set true for verified SSL
 
 translations: []           # see Path Translation below
@@ -108,6 +108,8 @@ Migration options:
                                  Mark items rated ≥9 in Plex as Jellyfin favorites
   --migrate-timestamps / --no-migrate-timestamps
                                  Copy Plex lastViewedAt to Jellyfin DatePlayed (default: on)
+  --migrate-positions / --no-migrate-positions
+                                 Copy Plex viewOffset resume positions to Jellyfin (default: on)
   --translate SRC|DST            Path translation (repeatable)
 
 Behaviour:
@@ -137,8 +139,18 @@ python3 migrate.py \
   --plex-url https://plex.example.com --plex-token abc123 \
   --jellyfin-url https://jellyfin.example.com --jellyfin-token xyz789 \
   --all-users --auto-create-user \
-  --migrate-ratings --migrate-favorites --migrate-timestamps \
+  --migrate-ratings --migrate-favorites --migrate-timestamps --migrate-positions \
   --dry-run
+```
+
+### Generic Docker
+
+If you are not running Saltbox, use the generic compose file and set public or LAN URLs in `config.yml`.
+
+```bash
+docker compose build
+docker compose run --rm migrate --dry-run
+docker compose run --rm migrate
 ```
 
 ---

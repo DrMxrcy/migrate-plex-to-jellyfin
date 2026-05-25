@@ -21,3 +21,4 @@ class MigrationStats:
     skipped: int = 0
     ratings_set: int = 0
     favorites_set: int = 0
+    playback_positions_set: int = 0
