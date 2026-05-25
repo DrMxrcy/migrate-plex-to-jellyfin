@@ -1,0 +1,66 @@
+import secrets
+import string
+from typing import List, Optional
+
+from loguru import logger
+from plexapi.server import PlexServer
+
+from jellyfin_client import JellyFinServer
+from models import PlexUser, JellyfinUser
+
+
+def discover_plex_users(plex: PlexServer, base_token: str) -> List[PlexUser]:
+    account = plex.myPlexAccount()
+    users: List[PlexUser] = [PlexUser(name=account.title, token=base_token, is_managed=False)]
+
+    for managed in account.users():
+        try:
+            token = managed.get_token(plex.machineIdentifier)
+            if not token:
+                logger.warning(f"Could not get token for Plex user '{managed.title}' — skipping")
+                continue
+            users.append(PlexUser(name=managed.title, token=token, is_managed=True))
+        except Exception as e:
+            logger.warning(f"Failed to get token for Plex user '{managed.title}': {e} — skipping")
+
+    return users
+
+
+def _random_password(length: int = 16) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def resolve_jellyfin_user(
+    jf: JellyFinServer,
+    plex_name: str,
+    auto_create: bool,
+    dry_run: bool,
+) -> Optional[JellyfinUser]:
+    jf_users = jf.get_users()
+
+    for u in jf_users:
+        if u.name == plex_name:
+            return u
+
+    for u in jf_users:
+        if u.name.lower() == plex_name.lower():
+            logger.info(f"Matched Plex user '{plex_name}' → Jellyfin user '{u.name}' (case-insensitive)")
+            return u
+
+    if not auto_create:
+        logger.warning(
+            f"No Jellyfin user found for '{plex_name}' — skipping "
+            f"(pass --auto-create-user to create automatically)"
+        )
+        return None
+
+    if dry_run:
+        logger.info(f"Would create Jellyfin user '{plex_name}' (dry run)")
+        return None
+
+    password = _random_password()
+    user = jf.create_user(plex_name, password)
+    print(f"\n  Created Jellyfin user '{user.name}' — initial password: {password}\n")
+    logger.info(f"Created Jellyfin user '{user.name}'")
+    return user
