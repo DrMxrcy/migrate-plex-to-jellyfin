@@ -85,8 +85,11 @@ class JellyFinServer:
                 break
             start += len(items)
 
-    def mark_watched(self, user_id: str, item_id: str) -> None:
-        self._post(f"Users/{user_id}/PlayedItems/{item_id}")
+    def mark_watched(self, user_id: str, item_id: str, date_played: Optional[str] = None) -> None:
+        params = None
+        if date_played:
+            params = {"DatePlayed": date_played}
+        self._post(f"Users/{user_id}/PlayedItems/{item_id}", params=params)
 
     def set_rating(self, user_id: str, item_id: str, rating: float) -> None:
         self._post(f"Users/{user_id}/Items/{item_id}/Rating", params={"rating": rating})

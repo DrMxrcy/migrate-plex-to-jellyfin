@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from typing import List, NamedTuple, Set, Optional
 import sys
+from datetime import datetime
 
 import requests
 import urllib3
@@ -130,9 +131,11 @@ def migrate_user(
             for m in tqdm(section.search(unwatched=False), desc=f"Movies ({section.title})", unit=" movie", leave=False):
                 parts = _watch_parts(m.media)
                 plex_watched.update(parts)
+                meta = {"lastViewedAt": getattr(m, "lastViewedAt", None)}
                 if track_item_meta:
-                    for p in parts:
-                        plex_item_meta[p] = {"userRating": getattr(m, "userRating", None)}
+                    meta["userRating"] = getattr(m, "userRating", None)
+                for p in parts:
+                    plex_item_meta[p] = meta
 
         elif isinstance(section, library.ShowSection):
             try:
@@ -148,9 +151,11 @@ def migrate_user(
                 for ep in show.watched():
                     parts = _watch_parts(ep.media)
                     plex_watched.update(parts)
+                    meta = {"lastViewedAt": getattr(ep, "lastViewedAt", None)}
                     if track_item_meta:
-                        for p in parts:
-                            plex_item_meta[p] = {"userRating": getattr(ep, "userRating", None)}
+                        meta["userRating"] = getattr(ep, "userRating", None)
+                    for p in parts:
+                        plex_item_meta[p] = meta
 
         else:
             logger.info(
@@ -180,9 +185,13 @@ def migrate_user(
 
             if not user_data.get("Played"):
                 stats.marked += 1
+                date_played = None
+                lv = meta.get("lastViewedAt")
+                if isinstance(lv, datetime):
+                    date_played = lv.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                 if not dry_run:
                     try:
-                        jf.mark_watched(user_id=jf_user.id, item_id=item_id)
+                        jf.mark_watched(user_id=jf_user.id, item_id=item_id, date_played=date_played)
                         logger.bind(path=tr_watched, jf_id=item_id, title=item_name).info("Marked as watched")
                     except JellyfinAPIError as e:
                         logger.error(f"Failed to mark '{item_name}' as watched: {e}")

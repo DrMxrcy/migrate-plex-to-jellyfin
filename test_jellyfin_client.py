@@ -139,6 +139,12 @@ class TestMarkWatched:
         url = session.post.call_args.kwargs["url"]
         assert "Users/uid/PlayedItems/iid" in url
 
+    def test_sends_date_played_when_provided(self, client, session):
+        session.post.return_value = ok_response({})
+        client.mark_watched("uid", "iid", date_played="2023-10-15T14:30:00.000000Z")
+        params = session.post.call_args.kwargs.get("params")
+        assert params == {"DatePlayed": "2023-10-15T14:30:00.000000Z"}
+
     def test_raises_on_failure(self, client, session):
         session.post.return_value = error_response(500)
         with pytest.raises(JellyfinAPIError):

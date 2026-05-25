@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 from unittest.mock import MagicMock, patch, call
 from plexapi import library as plex_library
@@ -7,7 +9,7 @@ from jellyfin_client import JellyFinServer
 from migrate import migrate_user, PathTranslation, build_translation_library, translate_path
 
 
-def make_plex_movie(file_path: str, user_rating=None):
+def make_plex_movie(file_path: str, user_rating=None, last_viewed_at=None):
     part = MagicMock()
     part.file = file_path
     medium = MagicMock()
@@ -15,10 +17,11 @@ def make_plex_movie(file_path: str, user_rating=None):
     movie = MagicMock()
     movie.media = [medium]
     movie.userRating = user_rating
+    movie.lastViewedAt = last_viewed_at
     return movie
 
 
-def make_plex_episode(file_path: str, user_rating=None):
+def make_plex_episode(file_path: str, user_rating=None, last_viewed_at=None):
     part = MagicMock()
     part.file = file_path
     medium = MagicMock()
@@ -26,6 +29,7 @@ def make_plex_episode(file_path: str, user_rating=None):
     ep = MagicMock()
     ep.media = [medium]
     ep.userRating = user_rating
+    ep.lastViewedAt = last_viewed_at
     return ep
 
 
@@ -79,8 +83,22 @@ class TestMigrateUserMovies:
         stats = migrate_user(plex, jf, jf_user, [], dry_run=False, no_skip=False,
                              migrate_ratings=False, migrate_favorites=False)
 
-        jf.mark_watched.assert_called_once_with(user_id="jf_uid", item_id="jf1")
+        jf.mark_watched.assert_called_once_with(user_id="jf_uid", item_id="jf1", date_played=None)
         assert stats.marked == 1
+
+    def test_passes_last_viewed_at_timestamp(self, jf, jf_user):
+        viewed_at = datetime(2023, 10, 15, 14, 30, 0)
+        movie = make_plex_movie("/media/film.mkv", last_viewed_at=viewed_at)
+        jf_item = make_jf_item("jf1", "/media/film.mkv", played=False)
+        jf.iter_items.return_value = iter([jf_item])
+        plex = make_plex([make_movie_section([movie])])
+
+        migrate_user(plex, jf, jf_user, [], dry_run=False, no_skip=False,
+                     migrate_ratings=False, migrate_favorites=False)
+
+        jf.mark_watched.assert_called_once_with(
+            user_id="jf_uid", item_id="jf1", date_played="2023-10-15T14:30:00.000000Z"
+        )
 
     def test_skips_already_watched_item(self, jf, jf_user):
         movie = make_plex_movie("/media/film.mkv")
