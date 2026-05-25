@@ -1,13 +1,16 @@
-# BUILD STAGE
-FROM python:slim
-
-WORKDIR /usr/src/app
-
-COPY requirements.txt ./
+# ---- build stage: install deps ----
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# ---- runtime stage ----
+FROM python:3.12-slim
+WORKDIR /app
 
-ENTRYPOINT [ "python3", "migrate.py" ]
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-CMD [ "python3", "migrate.py", "--help" ]
+COPY models.py jellyfin_client.py user_manager.py migrate.py ./
+
+ENTRYPOINT ["python3", "migrate.py"]

@@ -1,0 +1,9 @@
+services:
+  migrate:
+    image: ghcr.io/wilmardo/migrate-plex-to-jellyfin:latest
+    env_file:
+      - .env
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    command: --config /app/config.yml
+    restart: "no"

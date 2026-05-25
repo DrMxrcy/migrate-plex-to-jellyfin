@@ -1,0 +1,30 @@
+# Saltbox variant — connects to the 'saltbox' Docker network so Plex and
+# Jellyfin containers are reachable by their container names.
+#
+# Saltbox default paths:
+#   Plex media:     /mnt/unionfs/Media  →  container path: /data/Media
+#   Jellyfin media: /mnt/unionfs/Media  →  container path: /data/Media
+#
+# Because both containers use the same internal path (/data/...), no
+# --translate flag is needed unless you've customised your mount points.
+#
+# Usage:
+#   1. Copy .env.example → .env and fill in your tokens
+#   2. Copy config.example.yml → config.yml and set all_users: true
+#   3. docker compose -f docker-compose.saltbox.yml run --rm migrate
+
+services:
+  migrate:
+    image: ghcr.io/wilmardo/migrate-plex-to-jellyfin:latest
+    networks:
+      - saltbox
+    env_file:
+      - .env
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    command: --config /app/config.yml
+    restart: "no"
+
+networks:
+  saltbox:
+    external: true

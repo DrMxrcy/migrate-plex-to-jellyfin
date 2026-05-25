@@ -1,0 +1,13 @@
+.git
+.github
+docs
+plexsync
+venv
+__pycache__
+*.pyc
+*.pyo
+*.md
+test_*.py
+config.example.yml
+docker-compose*.yml
+.env*
