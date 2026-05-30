@@ -78,6 +78,7 @@ options:
   all_users: true          # migrate all Plex users in one run
   auto_create_user: true   # create Jellyfin account if user not found
   dry_run: false
+  plex_timeout: 60         # increase if Plex is slow to respond
   migrate_ratings: false   # copy Plex star ratings to Jellyfin
   migrate_favorites: false # items rated ≥9 in Plex → Jellyfin favorite
   migrate_timestamps: true # copy lastViewedAt to Jellyfin DatePlayed
@@ -101,6 +102,7 @@ Core:
   --config PATH                  YAML config file
   --plex-url TEXT                Plex server URL  [required]
   --plex-token TEXT              Plex token  [required]
+  --plex-timeout INTEGER         Plex connection timeout in seconds
   --plex-managed-user TEXT       Specific managed user (single-user mode)
   --jellyfin-url TEXT            Jellyfin server URL  [required]
   --jellyfin-token TEXT          Jellyfin API key  [required]

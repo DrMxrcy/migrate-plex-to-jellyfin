@@ -22,6 +22,9 @@ options:
   # Preview what would happen without writing anything
   dry_run: false
 
+  # Plex connection timeout in seconds. Increase if Plex is slow to respond.
+  plex_timeout: 60
+
   # Migrate Plex star ratings to Jellyfin
   migrate_ratings: false
 

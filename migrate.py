@@ -2,7 +2,7 @@
 from typing import List, NamedTuple, Set, Optional
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -48,6 +48,16 @@ class UserPlanRow(NamedTuple):
 
 TranslationLib = List[PathTranslation]
 TICKS_PER_MILLISECOND = 10000
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def format_utc(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def build_translation_library(args: List[str]) -> TranslationLib:
@@ -289,8 +299,8 @@ def _write_reports(
         base = f"{stamp}-plex-to-jellyfin-{mode}"
         data = {
             "dry_run": dry_run,
-            "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "completed_at": completed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "started_at": format_utc(started_at),
+            "completed_at": format_utc(completed_at),
             "options": options,
             "users": _report_user_rows(results),
         }
@@ -323,6 +333,7 @@ def _load_config_callback(ctx, param, value):
         "plex_token": plex.get("token"),
         "jellyfin_url": jf.get("url"),
         "jellyfin_token": jf.get("token"),
+        "plex_timeout": opts.get("plex_timeout"),
         "all_users": opts.get("all_users"),
         "auto_create_user": opts.get("auto_create_user"),
         "dry_run": opts.get("dry_run"),
@@ -517,6 +528,7 @@ def migrate_user(
               callback=_load_config_callback, help="YAML config file (values overridden by CLI flags)")
 @click.option("--plex-url", required=True, callback=_validate_url, help="Plex server URL")
 @click.option("--plex-token", required=True, help="Plex token")
+@click.option("--plex-timeout", type=int, default=60, help="Plex connection timeout in seconds")
 @click.option("--plex-managed-user", help="Specific managed user (single-user mode only)")
 @click.option("--jellyfin-url", required=True, callback=_validate_url, help="Jellyfin server URL")
 @click.option("--jellyfin-token", required=True, help="Jellyfin API token")
@@ -544,13 +556,13 @@ def migrate_user(
 @click.option("--debug/--no-debug", default=False, help="Verbose debug logging")
 @click.option("--no-skip/--skip", default=False, help="Exit (or fail user) on unmatched paths")
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without writing to Jellyfin")
-def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_token,
+def migrate(plex_url, plex_token, plex_timeout, plex_managed_user, jellyfin_url, jellyfin_token,
             jellyfin_user, all_users, plan_users, auto_create_user, translate, user_map,
             migrate_ratings, migrate_favorites, migrate_timestamps, migrate_positions,
             report_dir, secure, debug, no_skip, dry_run):
     logger.remove()
     logger.add(sys.stderr, format=LOG_FORMAT, level="DEBUG" if debug else "INFO")
-    started_at = datetime.utcnow()
+    started_at = utc_now()
 
     if not secure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -565,12 +577,23 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
 
     session = requests.Session()
     session.verify = secure
-    plex = PlexServer(plex_url, plex_token, session=session)
+    try:
+        plex = PlexServer(plex_url, plex_token, session=session, timeout=plex_timeout)
+    except requests.exceptions.RequestException as e:
+        raise click.ClickException(
+            f"Could not connect to Plex at {plex_url} within {plex_timeout}s: {e}"
+        ) from e
 
     if plex_managed_user and not all_users:
         managed = plex.myPlexAccount().user(plex_managed_user)
         managed_token = managed.get_token(plex.machineIdentifier)
-        plex = PlexServer(plex_url, managed_token, session=session)
+        try:
+            plex = PlexServer(plex_url, managed_token, session=session, timeout=plex_timeout)
+        except requests.exceptions.RequestException as e:
+            raise click.ClickException(
+                f"Could not connect to Plex managed user '{plex_managed_user}' at {plex_url} "
+                f"within {plex_timeout}s: {e}"
+            ) from e
 
     jf = JellyFinServer(url=jellyfin_url, api_key=jellyfin_token, session=session)
     translations = build_translation_library(list(translate))
@@ -578,6 +601,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
     report_dir = report_dir or "reports"
     report_options = {
         "all_users": all_users,
+        "plex_timeout": plex_timeout,
         "migrate_ratings": migrate_ratings,
         "migrate_favorites": migrate_favorites,
         "migrate_timestamps": migrate_timestamps,
@@ -613,7 +637,19 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
                     status=status,
                 )
                 continue
-            scoped_plex = PlexServer(plex_url, plex_user.token, session=session)
+            try:
+                scoped_plex = PlexServer(plex_url, plex_user.token, session=session, timeout=plex_timeout)
+            except requests.exceptions.RequestException as e:
+                logger.error(
+                    f"Could not connect to Plex for user '{plex_user.name}' at {plex_url} "
+                    f"within {plex_timeout}s: {e}"
+                )
+                all_stats[plex_user.name] = BulkMigrationResult(
+                    jellyfin_user=jf_user,
+                    stats=MigrationStats(),
+                    status="Failed",
+                )
+                continue
             try:
                 if shared_jf_entries is None:
                     logger.info("Loading shared Jellyfin media index...")
@@ -633,7 +669,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
                 )
 
         _print_bulk_summary(all_stats, dry_run)
-        _write_reports(report_dir, dry_run, started_at, datetime.utcnow(), all_stats, report_options)
+        _write_reports(report_dir, dry_run, started_at, utc_now(), all_stats, report_options)
     else:
         jf_users = jf.get_users()
         jf_user = next((u for u in jf_users if u.name == jellyfin_user), None)
@@ -656,7 +692,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
             report_dir,
             dry_run,
             started_at,
-            datetime.utcnow(),
+            utc_now(),
             {jellyfin_user: result},
             report_options,
         )

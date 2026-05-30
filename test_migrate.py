@@ -14,6 +14,8 @@ from migrate import (
     build_user_plan,
     build_translation_library,
     build_user_mapping,
+    utc_now,
+    format_utc,
     translate_path,
 )
 
@@ -287,6 +289,13 @@ class TestCliOptions:
             "Plex User": "Jellyfin User"
         }
 
+    def test_utc_now_is_timezone_aware_and_formats_with_z_suffix(self):
+        now = utc_now()
+
+        assert now.tzinfo is not None
+        assert now.utcoffset().total_seconds() == 0
+        assert format_utc(now).endswith("Z")
+
     def test_builds_user_plan_with_matches_mappings_and_create_actions(self):
         rows = build_user_plan(
             plex_users=[
@@ -362,6 +371,53 @@ class TestCliOptions:
         assert "Would create" in result.output
         assert "user_mappings:" in result.output
         migrate_user_mock.assert_not_called()
+
+    @patch("migrate.PlexServer")
+    @patch("migrate.JellyFinServer")
+    def test_passes_configured_plex_timeout_to_plex_server(
+        self,
+        jellyfin_server,
+        plex_server,
+    ):
+        from click.testing import CliRunner
+
+        jellyfin_server.return_value.get_users.return_value = [
+            JellyfinUser(id="1", name="john")
+        ]
+
+        result = CliRunner().invoke(migrate, [
+            "--plex-url", "http://plex.local",
+            "--plex-token", "plex_token",
+            "--jellyfin-url", "http://jellyfin.local",
+            "--jellyfin-token", "jellyfin_token",
+            "--jellyfin-user", "john",
+            "--plex-timeout", "120",
+            "--dry-run",
+        ])
+
+        assert result.exit_code == 0
+        assert plex_server.call_args.kwargs["timeout"] == 120
+
+    @patch("migrate.PlexServer")
+    def test_plex_connection_timeout_reports_clean_error(self, plex_server):
+        from click.testing import CliRunner
+        import requests
+
+        plex_server.side_effect = requests.exceptions.ReadTimeout("timed out")
+
+        result = CliRunner().invoke(migrate, [
+            "--plex-url", "http://plex.local",
+            "--plex-token", "plex_token",
+            "--jellyfin-url", "http://jellyfin.local",
+            "--jellyfin-token", "jellyfin_token",
+            "--jellyfin-user", "john",
+            "--plex-timeout", "120",
+        ])
+
+        assert result.exit_code != 0
+        assert "Could not connect to Plex" in result.output
+        assert "http://plex.local" in result.output
+        assert "120s" in result.output
 
     @patch("migrate.PlexServer")
     @patch("migrate.JellyFinServer")
