@@ -21,10 +21,13 @@ cp config.example.yml config.yml
 #    Saltbox defaults use http://plex:32400 and http://jellyfin:8096
 nano config.yml
 
-# 4. Dry run first — nothing is written to Jellyfin
+# 4. Review Plex-to-Jellyfin user matching before scanning media
+docker compose run --rm migrate --plan-users
+
+# 5. Dry run first — nothing is written to Jellyfin
 docker compose run --rm migrate --dry-run
 
-# 5. Run for real when the dry run looks right
+# 6. Run for real when the dry run looks right
 docker compose run --rm migrate
 ```
 
@@ -80,6 +83,7 @@ options:
   migrate_timestamps: true # copy lastViewedAt to Jellyfin DatePlayed
   migrate_positions: true  # copy viewOffset resume points to Jellyfin
   secure: false            # set true for verified SSL
+  report_dir: reports      # write JSON and text reports under config dir
 
 user_mappings: {}          # see User Mapping below
 
@@ -104,6 +108,7 @@ Core:
 
 Users:
   --all-users                    Migrate all Plex users in one run
+  --plan-users                   Show Plex-to-Jellyfin user actions without scanning media
   --auto-create-user / --no-auto-create-user
                                  Create missing Jellyfin accounts (default on with --all-users)
   --user-map PLEX|JELLYFIN       Assign Plex user to existing Jellyfin user (repeatable)
@@ -120,6 +125,7 @@ Migration options:
   --translate SRC|DST            Path translation (repeatable)
 
 Behaviour:
+  --report-dir PATH              Directory for JSON and text run reports
   --secure / --insecure          Verify SSL (default: insecure)
   --debug / --no-debug           Verbose output
   --no-skip / --skip             Fail on unmatched paths (default: skip)
@@ -144,6 +150,24 @@ The same mapping can be passed from the CLI:
 ```bash
 python3 migrate.py --all-users --user-map "Gavin Snell (Gavin8tor245)|gavin"
 ```
+
+### User Plan and Reports
+
+Before a bulk migration, run:
+
+```bash
+docker compose run --rm migrate --plan-users
+```
+
+This prints the Plex users, their Jellyfin match, and whether the real run would migrate, create, skip, or need a mapping fix.
+
+Dry runs and real runs write JSON and text reports. In Saltbox, the default report directory is:
+
+```text
+/opt/migrate-plex-to-jellyfin/reports/
+```
+
+Bulk mode builds the Jellyfin media path index once per run and reuses it for each Plex user, so all-user migrations avoid rescanning the whole Jellyfin library for every user.
 
 ### Single user example
 

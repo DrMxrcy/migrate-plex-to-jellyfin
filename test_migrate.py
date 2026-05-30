@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 
 import pytest
 from unittest.mock import MagicMock, patch, call
@@ -10,6 +11,7 @@ from migrate import (
     migrate,
     migrate_user,
     PathTranslation,
+    build_user_plan,
     build_translation_library,
     build_user_mapping,
     translate_path,
@@ -285,6 +287,82 @@ class TestCliOptions:
             "Plex User": "Jellyfin User"
         }
 
+    def test_builds_user_plan_with_matches_mappings_and_create_actions(self):
+        rows = build_user_plan(
+            plex_users=[
+                PlexUser(name="JP", token="jp_token", is_managed=False),
+                PlexUser(name="Mxrcy", token="mxrcy_token", is_managed=True),
+                PlexUser(name="Gavin Snell (Gavin8tor245)", token="gavin_token", is_managed=True),
+                PlexUser(name="Bad Map", token="bad_token", is_managed=True),
+            ],
+            jellyfin_users=[
+                JellyfinUser(id="1", name="john"),
+                JellyfinUser(id="2", name="Mxrcy"),
+            ],
+            user_mappings={
+                "JP": "john",
+                "Bad Map": "missing-user",
+            },
+            auto_create=True,
+        )
+
+        by_name = {row.plex_name: row for row in rows}
+        assert by_name["JP"].target_name == "john"
+        assert by_name["JP"].status == "Mapped"
+        assert by_name["Mxrcy"].status == "Exact match"
+        assert by_name["Gavin Snell (Gavin8tor245)"].status == "Would create"
+        assert by_name["Bad Map"].status == "Mapping missing"
+
+    def test_builds_user_plan_skip_when_auto_create_disabled(self):
+        rows = build_user_plan(
+            plex_users=[PlexUser(name="No Match", token="token", is_managed=True)],
+            jellyfin_users=[],
+            user_mappings={},
+            auto_create=False,
+        )
+
+        assert rows[0].status == "Skipped"
+
+    @patch("migrate.PlexServer")
+    @patch("migrate.JellyFinServer")
+    @patch("migrate.discover_plex_users")
+    @patch("migrate.migrate_user")
+    def test_plan_users_prints_plan_without_migrating(
+        self,
+        migrate_user_mock,
+        discover_plex_users,
+        jellyfin_server,
+        plex_server,
+    ):
+        from click.testing import CliRunner
+
+        discover_plex_users.return_value = [
+            PlexUser(name="JP", token="jp_token", is_managed=False),
+            PlexUser(name="Gavin Snell (Gavin8tor245)", token="gavin_token", is_managed=True),
+        ]
+        jellyfin_server.return_value.get_users.return_value = [
+            JellyfinUser(id="1", name="john")
+        ]
+
+        result = CliRunner().invoke(migrate, [
+            "--plex-url", "http://plex.local",
+            "--plex-token", "plex_token",
+            "--jellyfin-url", "http://jellyfin.local",
+            "--jellyfin-token", "jellyfin_token",
+            "--all-users",
+            "--plan-users",
+            "--user-map", "JP|john",
+        ])
+
+        assert result.exit_code == 0
+        assert "User plan" in result.output
+        assert "JP -> john" in result.output
+        assert "Mapped" in result.output
+        assert "Gavin Snell (Gavin8tor245)" in result.output
+        assert "Would create" in result.output
+        assert "user_mappings:" in result.output
+        migrate_user_mock.assert_not_called()
+
     @patch("migrate.PlexServer")
     @patch("migrate.JellyFinServer")
     @patch("migrate.discover_plex_users")
@@ -351,3 +429,124 @@ class TestCliOptions:
         assert "Carol Plex -> Bob" in result.output
         assert "Would migrate" in result.output
         migrate_user_mock.assert_called_once()
+
+    @patch("migrate.PlexServer")
+    @patch("migrate.JellyFinServer")
+    @patch("migrate.migrate_user")
+    def test_single_user_dry_run_writes_json_and_text_reports(
+        self,
+        migrate_user_mock,
+        jellyfin_server,
+        plex_server,
+        tmp_path,
+    ):
+        from click.testing import CliRunner
+
+        report_dir = tmp_path / "reports"
+        jellyfin_server.return_value.get_users.return_value = [
+            JellyfinUser(id="1", name="john")
+        ]
+        migrate_user_mock.return_value = MigrationStats(
+            marked=2,
+            missing=1,
+            skipped=3,
+            ratings_set=4,
+            favorites_set=5,
+            playback_positions_set=6,
+        )
+
+        result = CliRunner().invoke(migrate, [
+            "--plex-url", "http://plex.local",
+            "--plex-token", "plex_token",
+            "--jellyfin-url", "http://jellyfin.local",
+            "--jellyfin-token", "jellyfin_token",
+            "--jellyfin-user", "john",
+            "--dry-run",
+            "--report-dir", str(report_dir),
+        ])
+
+        assert result.exit_code == 0
+        json_reports = list(report_dir.glob("*.json"))
+        text_reports = list(report_dir.glob("*.txt"))
+        assert len(json_reports) == 1
+        assert len(text_reports) == 1
+        data = json.loads(json_reports[0].read_text())
+        assert data["dry_run"] is True
+        assert data["users"][0]["plex_name"] == "john"
+        assert data["users"][0]["stats"]["marked"] == 2
+        assert "Report written:" in result.output
+
+    @patch("migrate.PlexServer")
+    @patch("migrate.JellyFinServer")
+    @patch("migrate.migrate_user")
+    def test_report_write_failure_warns_without_failing_migration(
+        self,
+        migrate_user_mock,
+        jellyfin_server,
+        plex_server,
+        tmp_path,
+    ):
+        from click.testing import CliRunner
+
+        report_dir_file = tmp_path / "not-a-directory"
+        report_dir_file.write_text("blocking file")
+        jellyfin_server.return_value.get_users.return_value = [
+            JellyfinUser(id="1", name="john")
+        ]
+        migrate_user_mock.return_value = MigrationStats(marked=1)
+
+        result = CliRunner().invoke(migrate, [
+            "--plex-url", "http://plex.local",
+            "--plex-token", "plex_token",
+            "--jellyfin-url", "http://jellyfin.local",
+            "--jellyfin-token", "jellyfin_token",
+            "--jellyfin-user", "john",
+            "--dry-run",
+            "--report-dir", str(report_dir_file),
+        ])
+
+        assert result.exit_code == 0
+        assert "Failed to write report" in result.output
+
+    @patch("migrate.PlexServer")
+    @patch("migrate.JellyFinServer")
+    @patch("migrate.discover_plex_users")
+    @patch("migrate.build_jellyfin_index")
+    @patch("migrate.migrate_user")
+    def test_all_users_reuses_one_jellyfin_index(
+        self,
+        migrate_user_mock,
+        build_jellyfin_index,
+        discover_plex_users,
+        jellyfin_server,
+        plex_server,
+        tmp_path,
+    ):
+        from click.testing import CliRunner
+
+        shared_index = {"/media/film.mkv": [make_jf_item("jf1", "/media/film.mkv")]}
+        build_jellyfin_index.return_value = shared_index
+        discover_plex_users.return_value = [
+            PlexUser(name="Alice", token="alice_token", is_managed=False),
+            PlexUser(name="Bob", token="bob_token", is_managed=True),
+        ]
+        jellyfin_server.return_value.get_users.return_value = [
+            JellyfinUser(id="1", name="Alice"),
+            JellyfinUser(id="2", name="Bob"),
+        ]
+        migrate_user_mock.return_value = MigrationStats(marked=1)
+
+        result = CliRunner().invoke(migrate, [
+            "--plex-url", "http://plex.local",
+            "--plex-token", "plex_token",
+            "--jellyfin-url", "http://jellyfin.local",
+            "--jellyfin-token", "jellyfin_token",
+            "--all-users",
+            "--dry-run",
+            "--report-dir", str(tmp_path / "reports"),
+        ])
+
+        assert result.exit_code == 0
+        build_jellyfin_index.assert_called_once_with(jellyfin_server.return_value, "1")
+        assert migrate_user_mock.call_count == 2
+        assert all(call.kwargs["jf_entries"] is shared_index for call in migrate_user_mock.call_args_list)

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from typing import List, NamedTuple, Set, Optional
 import sys
+import json
 from datetime import datetime
+from pathlib import Path
 
 import requests
 import urllib3
@@ -37,6 +39,13 @@ class BulkMigrationResult(NamedTuple):
     status: str
 
 
+class UserPlanRow(NamedTuple):
+    plex_name: str
+    target_name: Optional[str]
+    status: str
+    action: str
+
+
 TranslationLib = List[PathTranslation]
 TICKS_PER_MILLISECOND = 10000
 
@@ -55,6 +64,68 @@ def build_user_mapping(args: List[str]) -> dict:
         plex_name, jellyfin_name = arg.split("|", 1)
         mappings[plex_name] = jellyfin_name
     return mappings
+
+
+def _find_jellyfin_user(jellyfin_users: List[JellyfinUser], name: str) -> tuple[Optional[JellyfinUser], str]:
+    exact = next((u for u in jellyfin_users if u.name == name), None)
+    if exact:
+        return exact, "Exact match"
+    case_match = next((u for u in jellyfin_users if u.name.lower() == name.lower()), None)
+    if case_match:
+        return case_match, "Case match"
+    return None, ""
+
+
+def build_user_plan(
+    plex_users: List[PlexUser],
+    jellyfin_users: List[JellyfinUser],
+    user_mappings: dict,
+    auto_create: bool,
+) -> List[UserPlanRow]:
+    rows: List[UserPlanRow] = []
+    for plex_user in plex_users:
+        mapped_name = user_mappings.get(plex_user.name)
+        if mapped_name:
+            jf_user, _ = _find_jellyfin_user(jellyfin_users, mapped_name)
+            if jf_user:
+                rows.append(UserPlanRow(
+                    plex_name=plex_user.name,
+                    target_name=jf_user.name,
+                    status="Mapped",
+                    action="migrate to mapped Jellyfin user",
+                ))
+            else:
+                rows.append(UserPlanRow(
+                    plex_name=plex_user.name,
+                    target_name=mapped_name,
+                    status="Mapping missing",
+                    action="create Jellyfin user or fix user_mappings",
+                ))
+            continue
+
+        jf_user, status = _find_jellyfin_user(jellyfin_users, plex_user.name)
+        if jf_user:
+            rows.append(UserPlanRow(
+                plex_name=plex_user.name,
+                target_name=jf_user.name,
+                status=status,
+                action="migrate to matched Jellyfin user",
+            ))
+        elif auto_create:
+            rows.append(UserPlanRow(
+                plex_name=plex_user.name,
+                target_name=None,
+                status="Would create",
+                action="create Jellyfin user during real run",
+            ))
+        else:
+            rows.append(UserPlanRow(
+                plex_name=plex_user.name,
+                target_name=None,
+                status="Skipped",
+                action="enable auto_create_user or add user_mappings",
+            ))
+    return rows
 
 
 def _config_user_maps(raw_user_mappings) -> List[str]:
@@ -116,6 +187,18 @@ def _remember_plex_item(paths: Set[str], item_meta: dict, item) -> Set[str]:
     return parts
 
 
+def build_jellyfin_index(jf: JellyFinServer, user_id: str) -> dict:
+    jf_entries: dict = {}
+    for item in tqdm(jf.iter_items(user_id), desc="Jellyfin items", unit=" item", leave=False):
+        for source in item.get("MediaSources", []):
+            path = source.get("Path")
+            if not path:
+                continue
+            jf_entries.setdefault(path, []).append(item)
+            logger.bind(path=path, id=item["Id"]).debug("jf entry")
+    return jf_entries
+
+
 def _validate_url(ctx, param, value):
     if value is None:
         return value
@@ -123,6 +206,102 @@ def _validate_url(ctx, param, value):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise click.BadParameter(f"must be a valid HTTP/HTTPS URL, got: {value!r}")
     return value
+
+
+def _print_user_plan(rows: List[UserPlanRow]) -> None:
+    print("\nUser plan:\n")
+    header = f"{'Plex user':<36} {'Jellyfin target':<28} {'Status':<16} Action"
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        label = row.plex_name
+        target = row.target_name or "-"
+        if row.target_name and row.target_name != row.plex_name:
+            label = f"{row.plex_name} -> {row.target_name}"
+        print(f"{label:<36} {target:<28} {row.status:<16} {row.action}")
+
+    undecided = [row for row in rows if row.status in ("Would create", "Skipped", "Mapping missing")]
+    if undecided:
+        print("\nSuggested user_mappings block to edit if these Plex users should use existing Jellyfin accounts:\n")
+        print("user_mappings:")
+        for row in undecided:
+            print(f'  "{row.plex_name}": "existing-jellyfin-user"')
+    print()
+
+
+def _stats_to_dict(stats: MigrationStats) -> dict:
+    return {
+        "marked": stats.marked,
+        "missing": stats.missing,
+        "skipped": stats.skipped,
+        "ratings_set": stats.ratings_set,
+        "favorites_set": stats.favorites_set,
+        "playback_positions_set": stats.playback_positions_set,
+    }
+
+
+def _report_user_rows(results: dict) -> List[dict]:
+    rows = []
+    for plex_name, result in results.items():
+        rows.append({
+            "plex_name": plex_name,
+            "jellyfin_name": result.jellyfin_user.name if result.jellyfin_user else None,
+            "status": result.status,
+            "stats": _stats_to_dict(result.stats),
+        })
+    return rows
+
+
+def _format_text_report(data: dict) -> str:
+    lines = [
+        f"migrate-plex-to-jellyfin report ({'dry run' if data['dry_run'] else 'run'})",
+        f"Started: {data['started_at']}",
+        f"Completed: {data['completed_at']}",
+        "",
+    ]
+    header = f"{'Plex user':<32} {'Jellyfin user':<24} {'Status':<13} {'Marked':>7} {'Missing':>8} {'Skipped':>8} {'Ratings':>8} {'Favorites':>10} {'Positions':>10}"
+    lines.append(header)
+    lines.append("-" * len(header))
+    for user in data["users"]:
+        stats = user["stats"]
+        lines.append(
+            f"{user['plex_name']:<32} {str(user['jellyfin_name'] or '-'):<24} {user['status']:<13} "
+            f"{stats['marked']:>7} {stats['missing']:>8} {stats['skipped']:>8} "
+            f"{stats['ratings_set']:>8} {stats['favorites_set']:>10} {stats['playback_positions_set']:>10}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_reports(
+    report_dir: str,
+    dry_run: bool,
+    started_at: datetime,
+    completed_at: datetime,
+    results: dict,
+    options: dict,
+) -> None:
+    try:
+        target_dir = Path(report_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stamp = started_at.strftime("%Y%m%d-%H%M%S")
+        mode = "dry-run" if dry_run else "run"
+        base = f"{stamp}-plex-to-jellyfin-{mode}"
+        data = {
+            "dry_run": dry_run,
+            "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "completed_at": completed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "options": options,
+            "users": _report_user_rows(results),
+        }
+        json_path = target_dir / f"{base}.json"
+        text_path = target_dir / f"{base}.txt"
+        json_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        text_path.write_text(_format_text_report(data))
+        print(f"Report written: {json_path}")
+        print(f"Report written: {text_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write report: {e}")
 
 
 def _load_config_callback(ctx, param, value):
@@ -134,6 +313,11 @@ def _load_config_callback(ctx, param, value):
     plex = raw.get("plex", {})
     jf = raw.get("jellyfin", {})
     opts = raw.get("options", {})
+    report_dir = opts.get("report_dir")
+    if report_dir is None:
+        report_dir = str(Path(value).resolve().parent / "reports")
+    elif not Path(report_dir).is_absolute():
+        report_dir = str(Path(value).resolve().parent / report_dir)
     mapping = {
         "plex_url": plex.get("url"),
         "plex_token": plex.get("token"),
@@ -146,6 +330,7 @@ def _load_config_callback(ctx, param, value):
         "migrate_favorites": opts.get("migrate_favorites"),
         "migrate_timestamps": opts.get("migrate_timestamps"),
         "migrate_positions": opts.get("migrate_positions"),
+        "report_dir": report_dir,
         "secure": opts.get("secure"),
         "translate": raw.get("translations", []) or [],
         "user_map": _config_user_maps(raw.get("user_mappings")),
@@ -166,19 +351,15 @@ def migrate_user(
     migrate_timestamps: bool = True,
     migrate_positions: bool = True,
     bulk_mode: bool = False,
+    jf_entries: Optional[dict] = None,
 ) -> MigrationStats:
     stats = MigrationStats()
+    shared_jf_entries = jf_entries is not None
 
     # Build Jellyfin path index
-    logger.info(f"Loading Jellyfin library for '{jf_user.name}'...")
-    jf_entries: dict = {}
-    for item in tqdm(jf.iter_items(jf_user.id), desc="Jellyfin items", unit=" item", leave=False):
-        for source in item.get("MediaSources", []):
-            path = source.get("Path")
-            if not path:
-                continue
-            jf_entries.setdefault(path, []).append(item)
-            logger.bind(path=path, id=item["Id"]).debug("jf entry")
+    if jf_entries is None:
+        logger.info(f"Loading Jellyfin library for '{jf_user.name}'...")
+        jf_entries = build_jellyfin_index(jf, jf_user.id)
 
     # Load Plex watched items
     logger.info(f"Loading Plex watched items...")
@@ -270,7 +451,7 @@ def migrate_user(
             continue
 
         for jf_entry in jf_entries[tr_watched]:
-            user_data = jf_entry.get("UserData", {})
+            user_data = {} if shared_jf_entries else jf_entry.get("UserData", {})
             item_id = jf_entry["Id"]
             item_name = jf_entry["Name"]
 
@@ -341,6 +522,8 @@ def migrate_user(
 @click.option("--jellyfin-token", required=True, help="Jellyfin API token")
 @click.option("--jellyfin-user", default=None, help="Jellyfin username (required without --all-users)")
 @click.option("--all-users", is_flag=True, default=False, help="Migrate all Plex users in one run")
+@click.option("--plan-users", is_flag=True, default=False,
+              help="Show Plex-to-Jellyfin user actions without scanning media or migrating")
 @click.option("--auto-create-user/--no-auto-create-user", default=None,
               help="Create missing Jellyfin accounts (default: on with --all-users)")
 @click.option("--translate", type=str, multiple=True, default=[],
@@ -355,22 +538,27 @@ def migrate_user(
               help="Migrate Plex lastViewedAt to Jellyfin DatePlayed")
 @click.option("--migrate-positions/--no-migrate-positions", default=True,
               help="Migrate Plex viewOffset resume positions to Jellyfin")
+@click.option("--report-dir", type=click.Path(), default=None,
+              help="Directory for JSON and text run reports")
 @click.option("--secure/--insecure", default=False, help="Verify SSL certificates")
 @click.option("--debug/--no-debug", default=False, help="Verbose debug logging")
 @click.option("--no-skip/--skip", default=False, help="Exit (or fail user) on unmatched paths")
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without writing to Jellyfin")
 def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_token,
-            jellyfin_user, all_users, auto_create_user, translate, user_map, migrate_ratings,
-            migrate_favorites, migrate_timestamps, migrate_positions, secure, debug,
-            no_skip, dry_run):
+            jellyfin_user, all_users, plan_users, auto_create_user, translate, user_map,
+            migrate_ratings, migrate_favorites, migrate_timestamps, migrate_positions,
+            report_dir, secure, debug, no_skip, dry_run):
     logger.remove()
     logger.add(sys.stderr, format=LOG_FORMAT, level="DEBUG" if debug else "INFO")
+    started_at = datetime.utcnow()
 
     if not secure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if not all_users and not jellyfin_user:
         raise click.UsageError("--jellyfin-user is required when --all-users is not set")
+    if plan_users and not all_users:
+        raise click.UsageError("--plan-users requires --all-users")
 
     if auto_create_user is None:
         auto_create_user = all_users
@@ -387,10 +575,25 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
     jf = JellyFinServer(url=jellyfin_url, api_key=jellyfin_token, session=session)
     translations = build_translation_library(list(translate))
     user_mappings = build_user_mapping(list(user_map))
+    report_dir = report_dir or "reports"
+    report_options = {
+        "all_users": all_users,
+        "migrate_ratings": migrate_ratings,
+        "migrate_favorites": migrate_favorites,
+        "migrate_timestamps": migrate_timestamps,
+        "migrate_positions": migrate_positions,
+    }
+
+    if plan_users:
+        plex_users = discover_plex_users(plex, plex_token)
+        rows = build_user_plan(plex_users, jf.get_users(), user_mappings, auto_create_user)
+        _print_user_plan(rows)
+        return
 
     if all_users:
         plex_users = discover_plex_users(plex, plex_token)
         all_stats: dict = {}
+        shared_jf_entries = None
 
         for plex_user in plex_users:
             logger.info(f"Processing Plex user '{plex_user.name}'...")
@@ -412,9 +615,13 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
                 continue
             scoped_plex = PlexServer(plex_url, plex_user.token, session=session)
             try:
+                if shared_jf_entries is None:
+                    logger.info("Loading shared Jellyfin media index...")
+                    shared_jf_entries = build_jellyfin_index(jf, jf_user.id)
                 stats = migrate_user(scoped_plex, jf, jf_user, translations,
                                      dry_run, no_skip, migrate_ratings, migrate_favorites,
-                                     migrate_timestamps, migrate_positions, bulk_mode=True)
+                                     migrate_timestamps, migrate_positions, bulk_mode=True,
+                                     jf_entries=shared_jf_entries)
                 status = "Would migrate" if dry_run else "Migrated"
                 all_stats[plex_user.name] = BulkMigrationResult(jf_user, stats, status)
             except Exception as e:
@@ -426,6 +633,7 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
                 )
 
         _print_bulk_summary(all_stats, dry_run)
+        _write_reports(report_dir, dry_run, started_at, datetime.utcnow(), all_stats, report_options)
     else:
         jf_users = jf.get_users()
         jf_user = next((u for u in jf_users if u.name == jellyfin_user), None)
@@ -442,6 +650,15 @@ def migrate(plex_url, plex_token, plex_managed_user, jellyfin_url, jellyfin_toke
                     ratings=stats.ratings_set, favorites=stats.favorites_set,
                     positions=stats.playback_positions_set).success(
             f"{action} watched states for '{jellyfin_user}'"
+        )
+        result = BulkMigrationResult(jf_user, stats, "Would migrate" if dry_run else "Migrated")
+        _write_reports(
+            report_dir,
+            dry_run,
+            started_at,
+            datetime.utcnow(),
+            {jellyfin_user: result},
+            report_options,
         )
 
 

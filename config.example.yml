@@ -37,6 +37,9 @@ options:
   # Verify SSL certificates (set false for self-signed certs)
   secure: false
 
+  # Directory for migration reports. Relative paths resolve inside /app/config in Docker.
+  report_dir: reports
+
 # Optional Plex user -> existing Jellyfin user assignments.
 # Use this when a Plex display name should migrate into an existing Jellyfin account
 # instead of creating a new account with the Plex name.
